@@ -19,6 +19,52 @@ NORM_ANY_RE = re.compile(r"(?P<tipo>decreto[\s-]*ley|ley|decreto|resoluci[oó]n|
 QUERY_ART_RE = re.compile(r"(?:art(?:í|i)?culo|art\s*\.?)\s*(?:n\s*(?:ro\s*\.?|[º°o.]?)\s*)?(?P<num>\d+(?:\s*(?:bis|ter|quater|quinquies))?)", re.I)
 QUERY_NORM_RE = re.compile(r"(?P<tipo>decreto[\s-]*ley|ley|decreto|resoluci[oó]n|disposici[oó]n|acordada)\s*(?:n(?:ro\.?|[º°o.]?)\s*)?(?P<num>\d[\d.\-/]*)", re.I)
 
+
+# Normas que no llevan número en el Compendio.
+NAMED_NORMS = (
+    {
+        "key": "constitucion-formosa",
+        "label": "Constitución de la Provincia de Formosa",
+        "heading_patterns": (
+            r"^\s*constituci[oó]n\s+de\s+la\s+provincia\s+de\s+formosa\s*$",
+            r"^\s*constituci[oó]n\s+provincial\s*$",
+        ),
+        "query_patterns": (
+            r"\bconstituci[oó]n\s+de\s+la\s+provincia\s+de\s+formosa\b",
+            r"\bconstituci[oó]n\s+provincial\b",
+            r"\bconstituci[oó]n\s+de\s+formosa\b",
+        ),
+    },
+    {
+        "key": "constitucion-nacional",
+        "label": "Constitución Nacional",
+        "heading_patterns": (
+            r"^\s*constituci[oó]n\s+nacional(?:\s+argentina)?\s*$",
+        ),
+        "query_patterns": (
+            r"\bconstituci[oó]n\s+nacional(?:\s+argentina)?\b",
+        ),
+    },
+)
+
+def named_norm_heading(line):
+    """Reconoce encabezados de normas sin número, evitando confundir menciones en el cuerpo."""
+    text = (line or "").strip()
+    for item in NAMED_NORMS:
+        for pat in item["heading_patterns"]:
+            if re.search(pat, text, re.I):
+                return {"label": item["label"], "key": item["key"]}
+    return None
+
+def named_norm_query(text):
+    """Reconoce una Constitución nombrada expresamente en una consulta del usuario."""
+    value = text or ""
+    for item in NAMED_NORMS:
+        for pat in item["query_patterns"]:
+            if re.search(pat, value, re.I):
+                return item["key"]
+    return None
+
 def normnum(s):
     return re.sub(r"[.\s]", "", s.lower())
 
@@ -280,6 +326,18 @@ def build_units_formatted(blocks, source):
 
     for block in blocks:
         line = block["text"]
+
+        # Constituciones y otras normas sin número: deben fijar el contexto normativo
+        # antes de que aparezcan sus artículos.
+        named = named_norm_heading(line)
+        if named:
+            flush()
+            current_article = None
+            current_norms = [named]
+            current_is_regulation = False
+            ley931_context = []
+            continue
+
         ms = norm_matches(line)
         ms_keys = {x["key"] for x in ms}
 
@@ -400,6 +458,14 @@ def build_units(lines, source):
         current_text = []
 
     for line in lines:
+        named = named_norm_heading(line)
+        if named:
+            flush()
+            current_article = None
+            current_norms = [named]
+            ley931_context = []
+            continue
+
         ms = norm_matches(line)
 
         if ms and is_heading(line):
@@ -442,7 +508,7 @@ def parse_query(q):
     am = QUERY_ART_RE.search(q)
     nm = QUERY_NORM_RE.search(q)
     article = am.group("num").strip().lower() if am else None
-    norm_key = normnum(nm.group("num")) if nm else None
+    norm_key = normnum(nm.group("num")) if nm else named_norm_query(q)
     return article, norm_key
 
 def build_index(units):
