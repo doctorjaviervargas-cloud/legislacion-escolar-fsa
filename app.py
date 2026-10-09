@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -22,7 +23,7 @@ BUNDLED_NORMATIVA_DIR = BASE_DIR / "Normativa"
 DATA_DIR = Path(os.getenv("APP_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 NORMATIVA_DIR = Path(os.getenv("NORMATIVA_DIR", str(DATA_DIR / "Normativa"))).resolve()
 APP_TITLE = "Legislación Escolar de Formosa — Dr. Javier Vargas"
-APP_VERSION = "Básica Online 4.3"
+APP_VERSION = "Básica Online 4.3.1"
 MAX_QUESTION_CHARS = int(os.getenv("MAX_QUESTION_CHARS", "2500"))
 MAX_QUERIES_PER_MINUTE = int(os.getenv("MAX_QUERIES_PER_MINUTE", "20"))
 
