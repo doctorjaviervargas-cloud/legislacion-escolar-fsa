@@ -23,7 +23,7 @@ BUNDLED_NORMATIVA_DIR = BASE_DIR / "Normativa"
 DATA_DIR = Path(os.getenv("APP_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 NORMATIVA_DIR = Path(os.getenv("NORMATIVA_DIR", str(DATA_DIR / "Normativa"))).resolve()
 APP_TITLE = "Legislación Escolar de Formosa — Dr. Javier Vargas"
-APP_VERSION = "Básica Online 4.3.2"
+APP_VERSION = "Básica Online 4.3.3"
 MAX_QUESTION_CHARS = int(os.getenv("MAX_QUESTION_CHARS", "2500"))
 MAX_QUERIES_PER_MINUTE = int(os.getenv("MAX_QUERIES_PER_MINUTE", "20"))
 
@@ -149,11 +149,67 @@ def safe_exact_response(question: str, found: list[dict[str, Any]], units: list[
     return {"mode":"sin coincidencias","answer":"No encontré respaldo suficiente en la normativa cargada.","sources":[],"ai_used":False}
 
 
+
+def _unit_identity(u):
+    return (
+        tuple(u.get("norm_labels", [])),
+        str(u.get("article", "")).strip().lower(),
+        (u.get("text") or "").strip(),
+    )
+
+def _is_ley931(u):
+    labels = " ".join(u.get("norm_labels", []))
+    return bool(re.search(r"\bLey\s*931\b", labels, re.I))
+
+def _is_decreto1324(u):
+    labels = " ".join(u.get("norm_labels", []))
+    normalized = labels.replace(".", "").replace(" ", "")
+    return "decreto1324/93" in normalized.lower()
+
+def _pair_ley931_with_decree(found, units):
+    """
+    Para lectura integral: si una búsqueda temática encuentra un artículo del
+    Decreto 1324/93, incorpora inmediatamente antes el artículo de igual número
+    de la Ley 931, aunque la frase buscada no figure literalmente en la Ley.
+    """
+    if not found:
+        return found
+
+    ley_by_article = {}
+    for u in units:
+        if _is_ley931(u):
+            art = str(u.get("article", "")).strip().lower()
+            if art and art not in ley_by_article:
+                ley_by_article[art] = u
+
+    out = []
+    seen = set()
+
+    def add(u):
+        key = _unit_identity(u)
+        if key not in seen:
+            seen.add(key)
+            out.append(u)
+
+    for u in found:
+        if _is_decreto1324(u):
+            art = str(u.get("article", "")).strip().lower()
+            law = ley_by_article.get(art)
+            if law:
+                add(law)
+        add(u)
+
+    return out
+
+
 def source_only_thematic(question: str, found: list[dict[str, Any]], context_hit: dict[str, Any] | None) -> dict[str, Any]:
     """
     Respuesta temática sin tarjetas de 'Fuente'.
     Toda la norma relacionada se incorpora una sola vez dentro de la respuesta.
+    Si aparece un artículo del Decreto 1324/93, se antepone el artículo de igual
+    número de la Ley 931 para brindar una lectura integral.
     """
+    found = _pair_ley931_with_decree(found, snapshot()["units"])
     if context_hit and context_hit.get("matched_phrase"):
         phrase=context_hit.get("matched_phrase","")
         explanation=core.sentence_around_phrase(context_hit.get("text",""), phrase)
@@ -388,6 +444,7 @@ def answer_question(question: str) -> dict[str, Any]:
 
     # La respuesta normativa sigue siendo directa y verificable. La IA, si está
     # configurada, se reserva para el bloque separado de Interpretación orientativa.
+    found=_pair_ley931_with_decree(found,units)
     result=source_only_thematic(question,found,context_hit)
     return add_interpretation(result,question,found,context_hit)
 
