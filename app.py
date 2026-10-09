@@ -22,9 +22,16 @@ BUNDLED_NORMATIVA_DIR = BASE_DIR / "Normativa"
 DATA_DIR = Path(os.getenv("APP_DATA_DIR", str(BASE_DIR / "data"))).resolve()
 NORMATIVA_DIR = Path(os.getenv("NORMATIVA_DIR", str(DATA_DIR / "Normativa"))).resolve()
 APP_TITLE = "Legislación Escolar de Formosa — Dr. Javier Vargas"
-APP_VERSION = "Básica Online 4.0"
+APP_VERSION = "Básica Online 4.3"
 MAX_QUESTION_CHARS = int(os.getenv("MAX_QUESTION_CHARS", "2500"))
 MAX_QUERIES_PER_MINUTE = int(os.getenv("MAX_QUERIES_PER_MINUTE", "20"))
+
+INTERPRETATION_NOTICE = (
+    "Esta interpretación tiene carácter informativo y orientativo y no sustituye "
+    "el texto oficial de la norma ni el asesoramiento jurídico profesional aplicable "
+    "al caso concreto. Para consultas, análisis de situaciones particulares o asistencia "
+    "legal especializada en materia docente, puede contactar al Dr. Javier Vargas."
+)
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "").strip() or secrets.token_hex(32)
@@ -125,37 +132,207 @@ def safe_exact_response(question: str, found: list[dict[str, Any]], units: list[
             "", "DECRETO 1324/93 — REGLAMENTACIÓN", f"Artículo {article}",
             (decree.get("text") or "").strip() if decree else "No se detectó texto reglamentario para este artículo en la normativa cargada.",
         ]
-        sources=[]
-        if law: sources.append(unit_source(law))
-        if decree: sources.append(unit_source(decree))
-        return {"mode":"exacta","answer":"\n".join(parts),"sources":sources,"ai_used":False}
+        return {
+            "mode":"exacta",
+            "answer":"\n".join(parts),
+            "sources":[],
+            "ai_used":False
+        }
     if found:
         u=found[0]
         return {
             "mode":"exacta",
             "answer":"MODO SEGURO — CONSULTA EXACTA\n\n" + f"{' + '.join(u.get('norm_labels', []))} — Artículo {u.get('article','')}\n\n" + (u.get("text") or "").strip(),
-            "sources":[unit_source(u)], "ai_used":False,
+            "sources":[], "ai_used":False,
         }
     return {"mode":"sin coincidencias","answer":"No encontré respaldo suficiente en la normativa cargada.","sources":[],"ai_used":False}
 
 
 def source_only_thematic(question: str, found: list[dict[str, Any]], context_hit: dict[str, Any] | None) -> dict[str, Any]:
-    sources=[unit_source(u) for u in found]
+    """
+    Respuesta temática sin tarjetas de 'Fuente'.
+    Toda la norma relacionada se incorpora una sola vez dentro de la respuesta.
+    """
     if context_hit and context_hit.get("matched_phrase"):
         phrase=context_hit.get("matched_phrase","")
         explanation=core.sentence_around_phrase(context_hit.get("text",""), phrase)
-        first=found[0] if found else None
-        answer=["MODO SEGURO — CONSULTA TEMÁTICA","",f"Tema localizado: {phrase}","","Explicación encontrada en el Compendio:",explanation]
-        if first:
-            answer += ["","Normativa relacionada:",f"{' + '.join(first.get('norm_labels', []))} — Artículo {first.get('article','')}","","Texto normativo recuperado:",(first.get("text") or "").strip()]
-        return {"mode":"temática segura","answer":"\n".join(answer),"sources":sources,"ai_used":False}
-    if found:
-        answer=["RESULTADOS EN LA NORMATIVA CARGADA","","La consulta no coincide con un artículo exacto. Estos son los pasajes más relacionados:"]
-        for i,u in enumerate(found[:3],1):
-            answer += ["",f"{i}. {' + '.join(u.get('norm_labels', []))} — Artículo {u.get('article','')}",(u.get("text") or "").strip()]
-        return {"mode":"temática","answer":"\n".join(answer),"sources":sources,"ai_used":False}
-    return {"mode":"sin coincidencias","answer":"No encontré respaldo suficiente en la normativa cargada.","sources":[],"ai_used":False}
 
+        answer=[
+            "MODO SEGURO — CONSULTA TEMÁTICA EXHAUSTIVA",
+            "",
+            f"Tema localizado: {phrase}",
+            "",
+            "Explicación encontrada en el Compendio:",
+            explanation,
+        ]
+
+        if found:
+            answer += [
+                "",
+                f"Normativa relacionada: {len(found)} referencia(s) encontrada(s)",
+            ]
+
+            for i,u in enumerate(found,1):
+                label=" + ".join(u.get("norm_labels", []))
+                article=u.get("article","")
+                text=(u.get("text") or "").strip()
+
+                answer += [
+                    "",
+                    f"{i}. {label} — Artículo {article}",
+                    text,
+                ]
+
+        return {
+            "mode":"temática exhaustiva",
+            "answer":"\n".join(answer),
+            "sources":[],
+            "ai_used":False
+        }
+
+    if found:
+        answer=[
+            "RESULTADOS EN LA NORMATIVA CARGADA",
+            "",
+            f"Se localizaron {len(found)} referencia(s) relacionadas:"
+        ]
+        for i,u in enumerate(found,1):
+            label=" + ".join(u.get("norm_labels", []))
+            article=u.get("article","")
+            text=(u.get("text") or "").strip()
+            answer += [
+                "",
+                f"{i}. {label} — Artículo {article}",
+                text,
+            ]
+
+        return {
+            "mode":"temática",
+            "answer":"\n".join(answer),
+            "sources":[],
+            "ai_used":False
+        }
+
+    return {
+        "mode":"sin coincidencias",
+        "answer":"No encontré respaldo suficiente en la normativa cargada.",
+        "sources":[],
+        "ai_used":False
+    }
+
+
+
+def _clean_for_interpretation(text: str) -> str:
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    text = re.sub(r"^(?:ART(?:Í|I)?CULO\s+\d+(?:\s+(?:BIS|TER|QUATER|QUINQUIES))?\s*[º°o.]?\s*[-–—.:)]*\s*)", "", text, flags=re.I)
+    return text.strip()
+
+
+def _extractive_interpretation(question: str, found: list[dict[str, Any]], context_hit: dict[str, Any] | None) -> str:
+    """Interpretación conservadora sin servicios externos.
+    Selecciona los pasajes más vinculados con la consulta y los presenta como lectura
+    orientativa, sin agregar requisitos, plazos o consecuencias que no estén en la fuente.
+    """
+    parts=[]
+    if context_hit and context_hit.get("matched_phrase"):
+        phrase=context_hit.get("matched_phrase","")
+        expl=core.sentence_around_phrase(context_hit.get("text", ""), phrase)
+        expl=_clean_for_interpretation(expl)
+        if expl:
+            parts.append(expl)
+
+    qterms=set(core.toks(question))
+    candidates=[]
+    for u in found[:12]:
+        txt=_clean_for_interpretation(u.get("text", ""))
+        if not txt:
+            continue
+        # Divide en tramos breves y prioriza los que contienen términos consultados.
+        sentences=[s.strip() for s in re.split(r"(?<=[.;:])\s+|\n+", txt) if s.strip()]
+        for s in sentences:
+            sterms=set(core.toks(s))
+            score=len(qterms & sterms)
+            if score or not qterms:
+                candidates.append((score, len(s), s))
+
+    candidates.sort(key=lambda x:(-x[0], x[1]))
+    for _,_,s in candidates:
+        if s not in parts:
+            parts.append(s)
+        if len(parts) >= 3:
+            break
+
+    if not parts and found:
+        txt=_clean_for_interpretation(found[0].get("text", ""))
+        if txt:
+            parts=[txt[:900].strip()]
+
+    if not parts:
+        return "No es posible formular una interpretación orientativa con respaldo suficiente en la normativa recuperada."
+
+    body=" ".join(parts)
+    if len(body) > 1600:
+        body=body[:1600].rsplit(" ",1)[0].rstrip(" ,;:") + "…"
+
+    return (
+        "Del contenido normativo recuperado se desprende, en términos orientativos, que "
+        + body[0].lower() + body[1:] if body else
+        "No es posible formular una interpretación orientativa con respaldo suficiente en la normativa recuperada."
+    )
+
+
+def interpretation_ai(question: str, found: list[dict[str, Any]], context_hit: dict[str, Any] | None) -> str | None:
+    """Genera una interpretación estrictamente limitada a las normas recuperadas cuando
+    hay una API de IA configurada. Si no existe, la aplicación usa el modo extractivo seguro.
+    """
+    api_key=os.getenv("OPENAI_API_KEY","").strip()
+    if not api_key or not found:
+        return None
+    try:
+        from openai import OpenAI
+        model=os.getenv("OPENAI_MODEL","gpt-6-luna").strip() or "gpt-6-luna"
+        client=OpenAI(api_key=api_key)
+        source_blocks=[]
+        for i,u in enumerate(found[:12],1):
+            source_blocks.append(
+                f"[NORMA {i}]\\nNorma: {' + '.join(u.get('norm_labels', []))}\\n"
+                f"Artículo: {u.get('article','')}\\nTexto: {u.get('text','')}"
+            )
+        compendium=context_hit.get("text","") if context_hit else ""
+        system=(
+            "Sos un asistente de interpretación orientativa de legislación escolar de Formosa. "
+            "Explicá en lenguaje claro únicamente lo que surge de los textos proporcionados. "
+            "No inventes requisitos, excepciones, plazos, efectos, artículos, jurisprudencia ni hechos. "
+            "No des asesoramiento sobre un caso concreto. Si hay ambigüedad, indicala. "
+            "Redactá uno o dos párrafos breves y no repitas literalmente toda la norma."
+        )
+        user=(
+            f"CONSULTA: {question}\\n\\nCONTEXTO DEL COMPENDIO:\\n{compendium}\\n\\n"
+            "TEXTOS NORMATIVOS:\\n" + "\\n\\n".join(source_blocks)
+        )
+        response=client.responses.create(
+            model=model,
+            input=[{"role":"system","content":system},{"role":"user","content":user}]
+        )
+        text=(response.output_text or "").strip()
+        return text or None
+    except Exception:
+        return None
+
+
+def add_interpretation(result: dict[str, Any], question: str, found: list[dict[str, Any]], context_hit: dict[str, Any] | None=None) -> dict[str, Any]:
+    if result.get("mode") in {"sin normativa", "sin coincidencias"} or not found:
+        result["interpretation"]=""
+        result["interpretation_ai"]=False
+        result["professional_notice"]=""
+        return result
+
+    ai_text=interpretation_ai(question, found, context_hit)
+    interpretation=ai_text or _extractive_interpretation(question, found, context_hit)
+    result["interpretation"]=interpretation
+    result["interpretation_ai"]=bool(ai_text)
+    result["professional_notice"]=INTERPRETATION_NOTICE
+    return result
 
 def online_ai_answer(question: str, found: list[dict[str, Any]], context_hit: dict[str, Any] | None) -> str | None:
     api_key=os.getenv("OPENAI_API_KEY","").strip()
@@ -166,7 +343,7 @@ def online_ai_answer(question: str, found: list[dict[str, Any]], context_hit: di
         model=os.getenv("OPENAI_MODEL","gpt-6-luna").strip() or "gpt-6-luna"
         client=OpenAI(api_key=api_key)
         source_blocks=[]
-        for i,u in enumerate(found[:5],1):
+        for i,u in enumerate(found[:15],1):
             source_blocks.append(
                 f"[FUENTE {i}]\nArchivo: {u.get('source','')}\nNorma: {' + '.join(u.get('norm_labels', []))}\nArtículo: {u.get('article','')}\nTexto literal:\n{u.get('text','')}"
             )
@@ -187,17 +364,31 @@ def online_ai_answer(question: str, found: list[dict[str, Any]], context_hit: di
 def answer_question(question: str) -> dict[str, Any]:
     st=snapshot(); units=st["units"]
     if not units:
-        return {"mode":"sin normativa","answer":"No hay normativa indexada en el servidor.","sources":[],"ai_used":False}
+        return {"mode":"sin normativa","answer":"No hay normativa indexada en el servidor.","sources":[],"ai_used":False,"interpretation":"","professional_notice":""}
+
     found,match_mode=core.retrieve(question,units,st["docs"],st["idf"])
     article,norm_key=core.parse_query(question)
+
     if article and norm_key and found:
-        return safe_exact_response(question,found,units)
-    bridge_found,context_hit,bridge_mode=core.retrieve_thematic_bridge(question,st["contexts"],st["cdocs"],st["cidf"],units)
-    if bridge_found: found=bridge_found
-    ai_text=online_ai_answer(question,found,context_hit)
-    if ai_text:
-        return {"mode":bridge_mode or match_mode or "IA online","answer":ai_text,"sources":[unit_source(u) for u in found],"ai_used":True}
-    return source_only_thematic(question,found,context_hit)
+        # Para Ley 931 agregamos también el artículo reglamentario a la base interpretativa.
+        interp_found=list(found[:1])
+        if norm_key == "931":
+            decree=find_decree_article(article,units)
+            if decree:
+                interp_found.append(decree)
+        result=safe_exact_response(question,found,units)
+        return add_interpretation(result,question,interp_found,None)
+
+    bridge_found,context_hit,bridge_mode=core.retrieve_thematic_bridge(
+        question,st["contexts"],st["cdocs"],st["cidf"],units
+    )
+    if bridge_found:
+        found=bridge_found
+
+    # La respuesta normativa sigue siendo directa y verificable. La IA, si está
+    # configurada, se reserva para el bloque separado de Interpretación orientativa.
+    result=source_only_thematic(question,found,context_hit)
+    return add_interpretation(result,question,found,context_hit)
 
 
 def client_ip() -> str:

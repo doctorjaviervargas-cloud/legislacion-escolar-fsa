@@ -6,6 +6,7 @@ from lxml import etree
 ROOT = Path(__file__).resolve().parent
 NORMATIVA = ROOT / "Normativa"
 TOP_K = 5
+MAX_THEMATIC_HITS = 40
 
 if hasattr(sys.stdout, "reconfigure"):
     try: sys.stdout.reconfigure(encoding="utf-8")
@@ -695,36 +696,125 @@ def resolve_refs(refs, units):
                 found.append(u)
     return found
 
+def _thematic_unit_key(u):
+    return (
+        u.get("source", ""),
+        tuple(u.get("norm_keys", [])),
+        str(u.get("article", "")),
+    )
+
+
+def _dedupe_units(items):
+    out = []
+    seen = set()
+    for u in items:
+        key = _thematic_unit_key(u)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(u)
+    return out
+
+
+def direct_phrase_units(q, units):
+    """Devuelve TODOS los artículos cuyo texto contiene literalmente
+    el tema consultado. Es la base de la búsqueda temática exhaustiva."""
+    phrases = meaningful_phrases(q)
+    if not phrases:
+        return [], None
+
+    phrase = phrases[0]
+    nph = normalize(phrase)
+    if len(nph) < 3:
+        return [], phrase
+
+    found = []
+    for u in units:
+        searchable = " ".join([
+            " ".join(u.get("norm_labels", [])),
+            str(u.get("article", "")),
+            u.get("text", "") or "",
+            u.get("law_text", "") or "",
+            u.get("reg_text", "") or "",
+        ])
+        if nph in normalize(searchable):
+            found.append(u)
+
+    return _dedupe_units(found), phrase
+
+
 def retrieve_thematic_bridge(q, contexts, cdocs, cidf, units):
-    # PRIMERA VÍA: frase jurídica literal.
-    exact_ctx, phrase = exact_phrase_context(q, contexts)
-    if exact_ctx and phrase:
-        local = local_snippet_around_phrase(exact_ctx["text"], phrase, radius=1100)
-        if local:
-            refs = refs_ranked_by_distance(local, phrase)
-            if not refs:
-                refs = extract_cross_refs(local)
-            resolved = resolve_refs(refs, units)
+    """
+    Búsqueda temática exhaustiva.
 
-            ctx = dict(exact_ctx)
+    Antes se elegía una sola aparición de la frase y eso podía ocultar otros
+    artículos importantes. Ahora:
+      1) se buscan todos los artículos cuyo texto contiene el tema;
+      2) se recorren todas las ventanas del Compendio donde aparece la frase;
+      3) se resuelven todas las referencias artículo+norma encontradas;
+      4) se combinan y eliminan duplicados.
+    """
+    direct, phrase = direct_phrase_units(q, units)
+
+    exact_ctx, best_phrase = exact_phrase_context(q, contexts)
+    phrase = best_phrase or phrase
+
+    resolved_all = []
+    matching_contexts = []
+
+    if phrase:
+        nph = normalize(phrase)
+        for c in contexts:
+            if nph and nph in normalize(c.get("text", "")):
+                matching_contexts.append(c)
+                local = local_snippet_around_phrase(c["text"], phrase, radius=1100) or c["text"]
+
+                refs = refs_ranked_by_distance(local, phrase)
+                # No nos limitamos a la primera estrategia: agregamos también
+                # las referencias cruzadas detectables en el mismo fragmento.
+                for ref in extract_cross_refs(local):
+                    if ref not in refs:
+                        refs.append(ref)
+
+                resolved_all.extend(resolve_refs(refs, units))
+
+    combined = _dedupe_units(direct + resolved_all)
+
+    if combined:
+        # Conservamos un fragmento explicativo legible para la cabecera.
+        ctx = dict(exact_ctx or matching_contexts[0]) if (exact_ctx or matching_contexts) else None
+        if ctx is not None and phrase:
             ctx["matched_phrase"] = phrase
-            ctx["text"] = local
-            ctx["detected_refs"] = refs
+            ctx["text"] = local_snippet_around_phrase(ctx["text"], phrase, radius=1100) or ctx["text"]
+            ctx["total_referencias"] = len(combined)
+            ctx["total_contextos"] = len(matching_contexts)
 
-            if resolved:
-                return resolved[:TOP_K], ctx, "frase temática exacta"
+        return combined[:MAX_THEMATIC_HITS], ctx, "temática exhaustiva"
 
-            # Hay una coincidencia literal, pero no una referencia resoluble.
-            # No se permite caer en una asociación temática lejana.
-            return [], ctx, "frase exacta sin referencia resuelta"
+    # Si la frase aparece en el Compendio, pero no pudo vincularse a un artículo,
+    # informamos esa coincidencia sin saltar a asociaciones lejanas.
+    if exact_ctx and phrase:
+        ctx = dict(exact_ctx)
+        ctx["matched_phrase"] = phrase
+        ctx["text"] = local_snippet_around_phrase(exact_ctx["text"], phrase, radius=1100) or exact_ctx["text"]
+        return [], ctx, "frase exacta sin referencia resuelta"
 
-    # SEGUNDA VÍA: solo si la frase exacta no aparece.
-    hits = top_contexts(q, contexts, cdocs, cidf, top_k=12)
+    # Segunda vía: consulta sin coincidencia literal. Acumulamos referencias de
+    # varios contextos relacionados en vez de quedarnos con el primer resultado.
+    hits = top_contexts(q, contexts, cdocs, cidf, top_k=16)
+    fallback = []
+    first_ctx = None
     for score, c in hits:
         refs = extract_cross_refs(c["text"])
         resolved = resolve_refs(refs, units)
         if resolved:
-            return resolved[:TOP_K], c, "temática referenciada"
+            if first_ctx is None:
+                first_ctx = c
+            fallback.extend(resolved)
+
+    fallback = _dedupe_units(fallback)
+    if fallback:
+        return fallback[:MAX_THEMATIC_HITS], first_ctx, "temática referenciada"
 
     return [], None, None
 
